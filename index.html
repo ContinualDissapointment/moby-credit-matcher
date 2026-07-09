@@ -42,6 +42,10 @@
   #summary { text-align: center; font-size: 1.05rem; margin: 24px 0; }
   #summary .big { font-size: 1.6rem; font-weight: 700; display: block; }
   #error { color: #dc2626; text-align: center; font-weight: 600; }
+  #notice:not(:empty) {
+    max-width: 640px; margin: 16px auto; padding: 10px 14px; text-align: center;
+    border: 1px solid #f59e0b; border-radius: 6px; background: #f59e0b22; font-size: .9rem;
+  }
 
   #results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
   .credit-list { border: 1px solid #8884; border-radius: 8px; padding: 12px 16px; }
@@ -92,9 +96,16 @@
     </select>
     <label><input type="checkbox" id="onlyMatches"> Only show matches</label>
   </div>
+  <div class="controls">
+    <span>Voice cast:</span>
+    <label><input type="radio" name="cast" value="all" checked> Include</label>
+    <label><input type="radio" name="cast" value="only"> Voice actors only</label>
+    <label><input type="radio" name="cast" value="none"> No voice actors</label>
+  </div>
 </div>
 
 <div id="error"></div>
+<div id="notice"></div>
 <div id="summary"></div>
 <div id="results">
   <div id="credits1" class="credit-list" hidden></div>
@@ -114,10 +125,18 @@
    One role can name many people, so we take every /person/ link in the
    row, not just the first. Person IDs are stable, so we key matches on
    the ID and fall back to the name only when a link somehow lacks one.
+
+   Cast rows are structurally identical to crew rows, and their role cell
+   holds the *character* name ("Dana Scully"), not a job title. The only
+   thing identifying an actor is the <th> section heading above the row,
+   so we carry that down onto each credit.
    ------------------------------------------------------------------ */
 function extractCredits(doc) {
   const out = [];
+  let section = '';
   doc.querySelectorAll('table tr').forEach(tr => {
+    const th = tr.querySelector('th');
+    if (th) { section = th.textContent.trim().replace(/\s+/g, ' '); return; }
     const roleCell = tr.querySelector(':scope > td.text-right')
                   || tr.querySelector(':scope > td:first-child');
     if (!roleCell) return;
@@ -127,11 +146,18 @@ function extractCredits(doc) {
     links.forEach(a => {
       const m = (a.getAttribute('href') || '').match(/\/person\/(\d+)/);
       const name = a.textContent.trim().replace(/\s+/g, ' ');
-      if (name) out.push({ id: m ? m[1] : null, name, role });
+      if (name) out.push({ id: m ? m[1] : null, name, role, section });
     });
   });
   return out;
 }
+
+/* A credit is voice cast iff its section heading says so. Matching on the
+   role text instead would catch 0 of the 41 actors on a real page (their
+   roles are character names) while wrongly flagging "Casting Director" —
+   hence \b word boundaries, which exclude "Casting". Credits pasted before
+   this feature existed have no section, and count as crew. */
+const isVoiceCast = c => /\b(cast|voice|voices)\b/i.test(c.section || '');
 
 function extractMeta(doc) {
   const h1 = doc.querySelector('h1');
@@ -188,18 +214,40 @@ function render() {
     return;
   }
 
+  // The cast filter narrows who counts as "staff", so it must apply before
+  // the overlap maths -- "voice actors only" should report shared actors as a
+  // share of actors, not of the whole crew. (onlyMatches, below, is cosmetic.)
+  const castMode = document.querySelector('input[name=cast]:checked').value;
+  const noticeEl = document.getElementById('notice');
+  noticeEl.textContent = '';
+
+  if (castMode !== 'all') {
+    const known = a.credits.some(c => 'section' in c) || b.credits.some(c => 'section' in c);
+    if (!known) {
+      noticeEl.textContent =
+        'These credits were copied before the voice-cast filter existed, so nobody is tagged as cast. Re-grab both games with the bookmarklet.';
+    }
+    const keep = castMode === 'only' ? isVoiceCast : (c => !isVoiceCast(c));
+    a = Object.assign({}, a, { credits: a.credits.filter(keep) });
+    b = Object.assign({}, b, { credits: b.credits.filter(keep) });
+  }
+
   const peopleA = uniquePeople(a.credits);
   const peopleB = uniquePeople(b.credits);
   const shared = new Set([...peopleA].filter(k => peopleB.has(k)));
 
   const pct = (n, d) => d ? ((n / d) * 100).toFixed(1) : '0.0';
 
+  const noun = { all: 'credited staff', only: 'voice actors', none: 'non-cast staff' }[castMode];
+  const who = castMode === 'only'
+    ? (shared.size === 1 ? 'voice actor' : 'voice actors')
+    : (shared.size === 1 ? 'person' : 'people');
+
   sumEl.innerHTML =
-    '<span class="big">' + shared.size + ' ' +
-      (shared.size === 1 ? 'person' : 'people') + ' worked on both</span>' +
+    '<span class="big">' + shared.size + ' ' + who + ' worked on both</span>' +
     esc(a.game) + ' &nbsp;&middot;&nbsp; ' + esc(b.game) + '<br>' +
-    pct(shared.size, peopleA.size) + '% of ' + esc(a.game) + "'s " + peopleA.size + ' credited staff also worked on ' + esc(b.game) + '<br>' +
-    pct(shared.size, peopleB.size) + '% of ' + esc(b.game) + "'s " + peopleB.size + ' credited staff also worked on ' + esc(a.game);
+    pct(shared.size, peopleA.size) + '% of ' + esc(a.game) + "'s " + peopleA.size + ' ' + noun + ' also worked on ' + esc(b.game) + '<br>' +
+    pct(shared.size, peopleB.size) + '% of ' + esc(b.game) + "'s " + peopleB.size + ' ' + noun + ' also worked on ' + esc(a.game);
 
   const sortOption = document.getElementById('sortOption').value;
   const onlyMatches = document.getElementById('onlyMatches').checked;
@@ -241,12 +289,17 @@ document.getElementById('sortOption').addEventListener('change', () => {
 document.getElementById('onlyMatches').addEventListener('change', () => {
   if (!document.getElementById('credits1').hidden) render();
 });
+document.querySelectorAll('input[name=cast]').forEach(r => r.addEventListener('change', () => {
+  if (!document.getElementById('credits1').hidden) render();
+}));
 
 /* ---------------- bookmarklet ---------------- */
 const BOOKMARKLET = function () {
-  var rows = document.querySelectorAll('table tr'), out = [];
+  var rows = document.querySelectorAll('table tr'), out = [], section = '';
   for (var i = 0; i < rows.length; i++) {
     var tr = rows[i];
+    var th = tr.querySelector('th');
+    if (th) { section = th.textContent.trim().replace(/\s+/g, ' '); continue; }
     var roleCell = tr.querySelector(':scope > td.text-right') || tr.querySelector(':scope > td:first-child');
     if (!roleCell) continue;
     var links = tr.querySelectorAll('td a[href*="/person/"]');
@@ -256,7 +309,7 @@ const BOOKMARKLET = function () {
       var a = links[j];
       var m = (a.getAttribute('href') || '').match(/\/person\/(\d+)/);
       var name = a.textContent.trim().replace(/\s+/g, ' ');
-      if (name) out.push({ id: m ? m[1] : null, name: name, role: role });
+      if (name) out.push({ id: m ? m[1] : null, name: name, role: role, section: section });
     }
   }
   if (!out.length) { alert('No credits found here.\n\nOpen a MobyGames page whose URL contains /credits/ and click again.'); return; }
