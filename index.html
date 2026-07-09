@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MobyGames Credit Matcher</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px;
+  }
+  h1 { text-align: center; margin-bottom: 4px; }
+  .sub { text-align: center; opacity: .7; margin-top: 0; }
+
+  .panel { border: 1px solid #8884; border-radius: 8px; padding: 16px; margin: 20px 0; }
+  .panel h2 { margin-top: 0; font-size: 1rem; }
+
+  .bookmarklet {
+    display: inline-block; padding: 6px 14px; border-radius: 6px;
+    background: #2563eb; color: #fff; text-decoration: none; font-weight: 600;
+    cursor: grab;
+  }
+  ol { padding-left: 20px; }
+  ol li { margin: 4px 0; }
+
+  .inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  textarea {
+    width: 100%; box-sizing: border-box; height: 120px; resize: vertical;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    border: 1px solid #8886; border-radius: 6px; padding: 8px;
+    background: Field; color: FieldText;
+  }
+  .controls { margin-top: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit; font-weight: 600; padding: 8px 18px; border-radius: 6px;
+    border: 0; background: #2563eb; color: #fff; cursor: pointer;
+  }
+  button:hover { background: #1d4ed8; }
+  select { font: inherit; padding: 6px; border-radius: 6px; }
+
+  #summary { text-align: center; font-size: 1.05rem; margin: 24px 0; }
+  #summary .big { font-size: 1.6rem; font-weight: 700; display: block; }
+  #error { color: #dc2626; text-align: center; font-weight: 600; }
+
+  #results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .credit-list { border: 1px solid #8884; border-radius: 8px; padding: 12px 16px; }
+  .credit-list h3 { margin: 0 0 2px; }
+  .credit-list .plat { opacity: .65; font-size: .85rem; margin-bottom: 10px; }
+  .credit { padding: 2px 0; border-bottom: 1px solid #8882; }
+  .credit .role { opacity: .7; font-size: .85rem; }
+  .match { color: #16a34a; font-weight: 700; }
+  @media (prefers-color-scheme: dark) { .match { color: #4ade80; } }
+
+  @media (max-width: 760px) {
+    .inputs, #results { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>MobyGames Credit Matcher</h1>
+<p class="sub">Find the people who worked on both of two games.</p>
+
+<div class="panel">
+  <h2>Step 1 &mdash; grab the credits</h2>
+  <p>
+    MobyGames sits behind Cloudflare, so this page can&rsquo;t download credits for you.
+    Instead, your own browser does it:
+  </p>
+  <ol>
+    <li>Drag this button to your bookmarks bar: <a class="bookmarklet" id="bm" href="#">Grab Moby Credits</a></li>
+    <li>Open a MobyGames <strong>credits</strong> page, e.g. <code>/game/134188/catherine-full-body/credits/playstation-4/</code></li>
+    <li>Click the bookmark. The credits are copied to your clipboard.</li>
+    <li>Paste below. Repeat for the second game.</li>
+  </ol>
+</div>
+
+<div class="panel">
+  <h2>Step 2 &mdash; paste and compare</h2>
+  <div class="inputs">
+    <textarea id="in1" placeholder="Paste credits for game 1 here…" spellcheck="false"></textarea>
+    <textarea id="in2" placeholder="Paste credits for game 2 here…" spellcheck="false"></textarea>
+  </div>
+  <div class="controls">
+    <button id="go">Compare</button>
+    <label for="sortOption">Sort:</label>
+    <select id="sortOption">
+      <option value="none">Original order</option>
+      <option value="alpha">Name (A&ndash;Z)</option>
+      <option value="role">Role</option>
+    </select>
+    <label><input type="checkbox" id="onlyMatches"> Only show matches</label>
+  </div>
+</div>
+
+<div id="error"></div>
+<div id="summary"></div>
+<div id="results">
+  <div id="credits1" class="credit-list" hidden></div>
+  <div id="credits2" class="credit-list" hidden></div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------
+   Extraction. MobyGames credit rows look like:
+
+     <tr>
+       <td class="text-right">Artists</td>
+       <td><a href="/person/123/ada-lovelace/" class="text-nowrap">Ada Lovelace</a>,
+           <a href="/person/456/alan-turing/"  class="text-nowrap">Alan Turing</a></td>
+     </tr>
+
+   One role can name many people, so we take every /person/ link in the
+   row, not just the first. Person IDs are stable, so we key matches on
+   the ID and fall back to the name only when a link somehow lacks one.
+   ------------------------------------------------------------------ */
+function extractCredits(doc) {
+  const out = [];
+  doc.querySelectorAll('table tr').forEach(tr => {
+    const roleCell = tr.querySelector(':scope > td.text-right')
+                  || tr.querySelector(':scope > td:first-child');
+    if (!roleCell) return;
+    const links = tr.querySelectorAll('td a[href*="/person/"]');
+    if (!links.length) return;
+    const role = roleCell.textContent.trim().replace(/\s+/g, ' ');
+    links.forEach(a => {
+      const m = (a.getAttribute('href') || '').match(/\/person\/(\d+)/);
+      const name = a.textContent.trim().replace(/\s+/g, ' ');
+      if (name) out.push({ id: m ? m[1] : null, name, role });
+    });
+  });
+  return out;
+}
+
+function extractMeta(doc) {
+  const h1 = doc.querySelector('h1');
+  const title = doc.querySelector('title');
+  const pm = ((title && title.textContent) || '').match(/credits\s*\(([^)]+)\)/i);
+  return {
+    game: h1 ? h1.textContent.trim().replace(/\s+/g, ' ') : 'Unknown Game',
+    platform: pm ? pm[1].trim() : ''
+  };
+}
+
+// Accepts bookmarklet JSON, or a raw dump of the page HTML as a fallback
+// in case a browser's CSP refuses to run the bookmarklet.
+function parseInput(text, which) {
+  text = text.trim();
+  if (!text) throw new Error('Paste the credits for game ' + which + ' first.');
+
+  if (text[0] === '{') {
+    let o;
+    try { o = JSON.parse(text); }
+    catch (e) { throw new Error("Game " + which + ": that looks like JSON but won't parse. Re-copy it."); }
+    if (!Array.isArray(o.credits) || !o.credits.length) {
+      throw new Error('Game ' + which + ': no credits in that JSON.');
+    }
+    return { game: o.game || 'Unknown Game', platform: o.platform || '', credits: o.credits };
+  }
+
+  const doc = new DOMParser().parseFromString(text, 'text/html');
+  const credits = extractCredits(doc);
+  if (!credits.length) {
+    throw new Error('Game ' + which + ": couldn't find credits in that. Paste the bookmarklet output, or the full HTML of a /credits/ page.");
+  }
+  return Object.assign(extractMeta(doc), { credits });
+}
+
+const keyOf = c => c.id ? 'p' + c.id : 'n' + c.name.toLowerCase();
+const uniquePeople = credits => new Set(credits.map(keyOf));
+
+function render() {
+  const errEl = document.getElementById('error');
+  const sumEl = document.getElementById('summary');
+  const box1 = document.getElementById('credits1');
+  const box2 = document.getElementById('credits2');
+  errEl.textContent = '';
+
+  let a, b;
+  try {
+    a = parseInput(document.getElementById('in1').value, 1);
+    b = parseInput(document.getElementById('in2').value, 2);
+  } catch (e) {
+    errEl.textContent = e.message;
+    sumEl.textContent = '';
+    box1.hidden = box2.hidden = true;
+    return;
+  }
+
+  const peopleA = uniquePeople(a.credits);
+  const peopleB = uniquePeople(b.credits);
+  const shared = new Set([...peopleA].filter(k => peopleB.has(k)));
+
+  const pct = (n, d) => d ? ((n / d) * 100).toFixed(1) : '0.0';
+
+  sumEl.innerHTML =
+    '<span class="big">' + shared.size + ' ' +
+      (shared.size === 1 ? 'person' : 'people') + ' worked on both</span>' +
+    esc(a.game) + ' &nbsp;&middot;&nbsp; ' + esc(b.game) + '<br>' +
+    pct(shared.size, peopleA.size) + '% of ' + esc(a.game) + "'s " + peopleA.size + ' credited staff also worked on ' + esc(b.game) + '<br>' +
+    pct(shared.size, peopleB.size) + '% of ' + esc(b.game) + "'s " + peopleB.size + ' credited staff also worked on ' + esc(a.game);
+
+  const sortOption = document.getElementById('sortOption').value;
+  const onlyMatches = document.getElementById('onlyMatches').checked;
+
+  const prep = list => {
+    let l = list.slice();
+    if (sortOption === 'alpha') l.sort((x, y) => x.name.localeCompare(y.name));
+    else if (sortOption === 'role') l.sort((x, y) => x.role.localeCompare(y.role) || x.name.localeCompare(y.name));
+    if (onlyMatches) l = l.filter(c => shared.has(keyOf(c)));
+    return l;
+  };
+
+  paint(box1, a, prep(a.credits), shared);
+  paint(box2, b, prep(b.credits), shared);
+}
+
+function paint(box, meta, credits, shared) {
+  box.hidden = false;
+  box.innerHTML =
+    '<h3>' + esc(meta.game) + '</h3>' +
+    '<div class="plat">' + esc(meta.platform || '') + ' &mdash; ' + credits.length + ' credits</div>' +
+    credits.map(c =>
+      '<div class="credit' + (shared.has(keyOf(c)) ? ' match' : '') + '">' +
+        esc(c.name) + '<div class="role">' + esc(c.role) + '</div>' +
+      '</div>'
+    ).join('');
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, ch => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+}
+
+document.getElementById('go').addEventListener('click', render);
+document.getElementById('sortOption').addEventListener('change', () => {
+  if (!document.getElementById('credits1').hidden) render();
+});
+document.getElementById('onlyMatches').addEventListener('change', () => {
+  if (!document.getElementById('credits1').hidden) render();
+});
+
+/* ---------------- bookmarklet ---------------- */
+const BOOKMARKLET = function () {
+  var rows = document.querySelectorAll('table tr'), out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var tr = rows[i];
+    var roleCell = tr.querySelector(':scope > td.text-right') || tr.querySelector(':scope > td:first-child');
+    if (!roleCell) continue;
+    var links = tr.querySelectorAll('td a[href*="/person/"]');
+    if (!links.length) continue;
+    var role = roleCell.textContent.trim().replace(/\s+/g, ' ');
+    for (var j = 0; j < links.length; j++) {
+      var a = links[j];
+      var m = (a.getAttribute('href') || '').match(/\/person\/(\d+)/);
+      var name = a.textContent.trim().replace(/\s+/g, ' ');
+      if (name) out.push({ id: m ? m[1] : null, name: name, role: role });
+    }
+  }
+  if (!out.length) { alert('No credits found here.\n\nOpen a MobyGames page whose URL contains /credits/ and click again.'); return; }
+  var h1 = document.querySelector('h1');
+  var pm = (document.title || '').match(/credits\s*\(([^)]+)\)/i);
+  var payload = JSON.stringify({
+    game: h1 ? h1.textContent.trim().replace(/\s+/g, ' ') : 'Unknown Game',
+    platform: pm ? pm[1].trim() : '',
+    url: location.href,
+    credits: out
+  });
+
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center';
+  var box = document.createElement('div');
+  box.style.cssText = 'background:#fff;color:#111;padding:16px;border-radius:8px;width:640px;max-width:90vw;font:14px system-ui,sans-serif';
+  var msg = document.createElement('div');
+  msg.style.cssText = 'font-weight:600;margin-bottom:8px';
+  msg.textContent = out.length + ' credits ready — press Ctrl+C to copy.';
+  var ta = document.createElement('textarea');
+  ta.value = payload;
+  ta.style.cssText = 'width:100%;box-sizing:border-box;height:160px;font:12px monospace;margin-bottom:10px';
+  var btn = document.createElement('button');
+  btn.textContent = 'Close';
+  btn.style.cssText = 'font:inherit;padding:6px 16px;cursor:pointer';
+  btn.onclick = function () { ov.remove(); };
+  ov.onclick = function (e) { if (e.target === ov) ov.remove(); };
+  box.appendChild(msg); box.appendChild(ta); box.appendChild(btn);
+  ov.appendChild(box); document.body.appendChild(ov);
+  ta.focus(); ta.select();
+  try {
+    navigator.clipboard.writeText(payload).then(function () {
+      msg.textContent = out.length + ' credits copied to clipboard!';
+    }, function () {});
+  } catch (e) {}
+};
+
+document.getElementById('bm').href =
+  'javascript:' + encodeURIComponent('(' + BOOKMARKLET.toString() + ')();');
+</script>
+</body>
+</html>
